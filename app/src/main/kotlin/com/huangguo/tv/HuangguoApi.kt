@@ -480,7 +480,6 @@ object HuangguoApi {
     private fun edgePlayback(id: String, ep: String, referer: String): String {
         if (id.isEmpty()) return ""
         return try {
-            val site = hello.optString("site", SITE.removePrefix("https://")) // KDF info 必须用服务端下发的 site
             // hello
             val kpg = KeyPairGenerator.getInstance("EC")
             kpg.initialize(ECGenParameterSpec("secp256r1"))
@@ -495,6 +494,7 @@ object HuangguoApi {
                 referer
             ) ?: return ""
             if (hello.optInt("v") != 1 || hello.optString("type") != "hello") return ""
+            val site = hello.optString("site", SITE.removePrefix("https://")) // KDF info 必须用服务端下发的 site
             val kid = hello.optString("kid")
             val sid = hello.optString("sid")
             val serverPub = b64urlDec.decode(hello.optString("server_pub"))
