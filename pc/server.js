@@ -21,9 +21,13 @@ try {
 } catch {}
 fs.mkdirSync(CACHE, { recursive: true });
 const SITE = 'https://huangguoai.com';
-const ENTRY = 'https://hgai5.com'; // 官方发布页（直连可达），用于发现最新镜像域名
-const KNOWN_MIRRORS = ['cb74.bg40t53p.cc', 'i8gbw.nt17g20k.cc', 'lpiep.nt17g20k.cc', 'hi9ly.nt17g20k.cc', 'a74c.nt17g20k.cc'];
+// 源站域名会轮换（2026-11 起主站 .com DNS 被污染，官方主用 .io）：
+// 直连候选镜像优先，.io 永远排第一；全部失败再走代理访问主站
+const ENTRY = 'https://huangguoai.ai'; // 官方发布页之一，公布最新可用域名（旧发布页 hgai5.com 仍在线）
+const ENTRY2 = 'https://hgai5.com';
+const KNOWN_MIRRORS = ['huangguoai.io', 'cb74.bg40t53p.cc', 'i8gbw.nt17g20k.cc', 'lpiep.nt17g20k.cc', 'hi9ly.nt17g20k.cc', 'a74c.nt17g20k.cc'];
 let siteHost = null; // 当前可用镜像 host（直连），null 表示未找到
+let lastDiscoverFail = 0; // 全部候选失败的节流：5 分钟内不再重复探测
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const PUB = path.join(__dirname, 'public');
 
@@ -45,12 +49,14 @@ const PROXY = detectProxy();
 let siteViaProxy = !!PROXY; // 站点域名是否走代理（启动时探测一次）
 
 /* ---------- 原始 HTTP over TLS（可选 CONNECT 代理），支持 3xx 跟随 ---------- */
-function rawGet(urlStr, proxy, timeoutMs, redirects = 3) {
+function rawGet(urlStr, proxy, timeoutMs, redirects = 3, opts = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(urlStr);
     const send = (sock) => {
-      let req = `GET ${u.pathname}${u.search} HTTP/1.1\r\nHost: ${u.host}\r\nConnection: close\r\nUser-Agent: ${UA}\r\nAccept: */*\r\nAccept-Language: zh-CN,zh;q=0.9\r\nReferer: ${u.protocol}//${u.host}/\r\n`;
-      req += '\r\n';
+      let req = `${opts.method || 'GET'} ${u.pathname}${u.search} HTTP/1.1\r\nHost: ${u.host}\r\nConnection: close\r\nUser-Agent: ${UA}\r\nAccept: */*\r\nAccept-Language: zh-CN,zh;q=0.9\r\nReferer: ${u.protocol}//${u.host}/\r\n`;
+      if (opts.headers) for (const [k, v] of Object.entries(opts.headers)) req += `${k}: ${v}\r\n`;
+      if (opts.body) req += `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(opts.body)}\r\n`;
+      req += '\r\n' + (opts.body || '');
       const parts = [];
       sock.on('data', (d) => parts.push(d));
       sock.on('end', () => {
@@ -109,14 +115,18 @@ async function probeHost(host) {
 async function discoverSite() {
   if (siteHost && await probeHost(siteHost)) return siteHost;
   siteHost = null;
+  if (Date.now() - lastDiscoverFail < 300_000) return null; // 刚全失败过，5 分钟内不再探测
   for (const h of KNOWN_MIRRORS) if (await probeHost(h)) { siteHost = h; return h; }
-  try {
-    const r = await rawGet(`${ENTRY}/`, null, 10000);
-    const hosts = [...new Set((r.body.toString('utf8').match(/https:\/\/[a-z0-9.-]+\.(?:cc|com|ai|net|tv)/gi) || []))]
-      .map((x) => x.replace(/^https:\/\//i, '').toLowerCase())
-      .filter((h) => h !== 'huangguoai.com' && h !== 'hgai5.com' && !/drleao|hzjvlo|googletagmanager|yandex|\.me$|x\.com|youtube|tiktok/.test(h));
-    for (const h of hosts) if (await probeHost(h)) { siteHost = h; return h; }
-  } catch {}
+  for (const entry of [ENTRY, ENTRY2]) {
+    try {
+      const r = await rawGet(`${entry}/`, null, 10000);
+      const hosts = [...new Set((r.body.toString('utf8').match(/https:\/\/[a-z0-9.-]+\.(?:cc|com|ai|net|tv|io)/gi) || []))]
+        .map((x) => x.replace(/^https:\/\//i, '').toLowerCase())
+        .filter((h) => !/huangguoai\.com|huangguoai\.ai|hgai5\.com|drleao|hzjvlo|googletagmanager|yandex|\.me$|x\.com|youtube|tiktok/.test(h));
+      for (const h of hosts) if (await probeHost(h)) { siteHost = h; return h; }
+    } catch {}
+  }
+  lastDiscoverFail = Date.now();
   return null;
 }
 
@@ -223,12 +233,120 @@ function parseDetail(html, id) {
   };
 }
 
+/* ---------- 播放地址解析（同步自 Yswag/xptv-extensions huangguo.js） ----------
+ * 1) 明文 JSON API  POST /api/videos/{id}/episodes/{ep}/playback → data.streams.main|hevc
+ * 2) 加密边缘通道   POST /api/playback/request
+ *    （ECDH P-256 + HKDF-SHA256 + AES-256-GCM，协议 "dx150-edge-v1"），明文 API 关闭后的兜底
+ * 3) 旧版页面抓取   详情页 videoInitialData.epPlaySrcs 兜底
+ */
+function pickStreams(j) {
+  const s = (j && j.data && j.data.streams) || {};
+  return s.main || s.hevc || '';
+}
+
+/* API 请求目标：镜像直连优先；无直连镜像但有系统代理时走主站 */
+function apiTarget() {
+  if (siteHost) return { host: siteHost, proxy: null };
+  if (PROXY) return { host: 'huangguoai.com', proxy: PROXY };
+  return null;
+}
+
+async function apiPlayback(id, ep, referer) {
+  const t = apiTarget();
+  if (!id || !t) return '';
+  try {
+    const url = `https://${t.host}/api/videos/${id}/episodes/${ep}/playback`;
+    const r = await rawGet(url, t.proxy, 15000, 0, {
+      method: 'POST',
+      body: '{}',
+      headers: { Accept: 'application/json, text/plain, */*', Origin: `https://${t.host}`, Referer: referer },
+    });
+    if (r.status !== 200) return '';
+    return pickStreams(JSON.parse(r.body.toString('utf8')));
+  } catch { return ''; }
+}
+
+/* dx150-edge-v1 纯 Node crypto 实现 */
+function hkdfSha256(ikm, salt, info, len) {
+  return Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, len));
+}
+function p256Random() { return crypto.randomBytes(16); }
+function edgeEncrypt(reqKey, iv, aad, plain) {
+  const c = crypto.createCipheriv('aes-256-gcm', reqKey, iv);
+  c.setAAD(aad);
+  return Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]); // 密文||tag
+}
+function edgeDecrypt(resKey, iv, aad, data) {
+  const c = crypto.createDecipheriv('aes-256-gcm', resKey, iv);
+  c.setAAD(aad);
+  c.setAuthTag(data.subarray(data.length - 16));
+  return Buffer.concat([c.update(data.subarray(0, data.length - 16)), c.final()]);
+}
+function b64url(buf) { return buf.toString('base64url'); }
+
+async function edgePlayback(id, ep, referer) {
+  const t = apiTarget();
+  if (!id || !t) return '';
+  try {
+    const post = (body) => rawGet(`https://${t.host}/api/playback/request`, t.proxy, 15000, 0, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { Accept: '*/*', Origin: `https://${t.host}`, Referer: referer },
+    }).then((r) => (r.status === 200 ? JSON.parse(r.body.toString('utf8')) : null));
+    // hello
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const pubRaw = publicKey.export({ type: 'spki', format: 'der' });
+    // 从 SPKI 末尾取非压缩公钥 65 字节（04||X||Y）
+    const pub65 = pubRaw.subarray(pubRaw.length - 65);
+    const hello = await post({ v: 1, type: 'hello', client_pub: b64url(pub65) });
+    if (!hello || hello.v !== 1 || hello.type !== 'hello' || !hello.sid || !hello.kid) return '';
+    const site = hello.site || t.host; // KDF info 必须用服务端下发的 site
+    const shared = crypto.diffieHellman({ privateKey, publicKey: crypto.createPublicKey({
+      key: Buffer.concat([Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'), Buffer.from(hello.server_pub, 'base64url')]),
+      type: 'spki', format: 'der',
+    }) });
+    const salt = Buffer.from(hello.salt, 'base64url');
+    if (salt.length !== 32) return '';
+    const infoStr = ['dx150-edge-v1', 'playback', site, hello.kid, hello.sid].join('\n');
+    const reqKey = hkdfSha256(shared, salt, Buffer.from(infoStr + '\nreq'), 32);
+    const resKey = hkdfSha256(shared, salt, Buffer.from(infoStr + '\nres'), 32);
+    const offset = (hello.server_time || 0) - Math.floor(Date.now() / 1000);
+    // call（seq=1，iv 高 8 字节全零 + seq 大端）
+    const seq = 1;
+    const ts = Math.floor(Date.now() / 1000) + offset;
+    const iv = Buffer.alloc(12); iv.writeUInt32BE(seq, 8);
+    const aadReq = Buffer.from(`${infoStr}\nreq\n${seq}\n${ts}`);
+    const packet = Buffer.from(JSON.stringify({ request: {
+      method: 'POST',
+      path: `/api/videos/${id}/episodes/${ep}/playback`,
+      body: Buffer.from('{}').toString('base64'),
+      content_type: 'application/json',
+      visitor_id: p256Random().toString('hex'),
+      channel_code: '',
+    } }));
+    const res = await post({ v: 1, type: 'call', kid: hello.kid, sid: hello.sid, seq, ts, ciphertext: b64url(edgeEncrypt(reqKey, iv, aadReq, packet)) });
+    if (!res || res.v !== 1 || res.type !== 'result' || res.sid !== hello.sid || res.seq !== seq) return '';
+    const aadRes = Buffer.from(`${infoStr}\nres\n${seq}\n${ts}`);
+    const inner = JSON.parse(edgeDecrypt(resKey, iv, aadRes, Buffer.from(res.ciphertext, 'base64url')).toString('utf8'));
+    const text = inner.body ? Buffer.from(inner.body, 'base64').toString('utf8') : '';
+    return pickStreams(JSON.parse(text));
+  } catch { return ''; }
+}
+
 async function resolvePlay(id, ep) {
-  // 先试详情页内嵌 playMap（首页进入时已带），否则抓对应集页面
-  const pageUrl = ep === 1 ? `${SITE}/video/${id}/` : `${SITE}/video/${id}/ep-${ep}/`;
-  const r = await fetchHtml(pageUrl);
-  const d = parseDetail(r.body.toString('utf8'), id);
-  const url = d.playMap[String(ep)] || d.playMap[ep] || null;
+  const referer = `${SITE}/video/${id}/`;
+  // 1) 明文 JSON API
+  if (!siteHost) await discoverSite();
+  let url = await apiPlayback(id, ep, referer);
+  // 2) 加密边缘通道兜底
+  if (!url) url = await edgePlayback(id, ep, referer);
+  // 3) 旧版页面抓取兜底
+  if (!url) {
+    const pageUrl = ep === 1 ? `${SITE}/video/${id}/` : `${SITE}/video/${id}/ep-${ep}/`;
+    const r = await fetchHtml(pageUrl);
+    const d = parseDetail(r.body.toString('utf8'), id);
+    url = d.playMap[String(ep)] || d.playMap[ep] || null;
+  }
   if (!url) throw new Error('未找到播放地址');
   return url;
 }

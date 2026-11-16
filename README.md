@@ -2,7 +2,7 @@
 
 参考 [N3urda/hongguoTV](https://github.com/N3urda/hongguoTV) 的 kotlin-tv 原生电视端方案开发的**黄果短剧** Android TV / 手机播放器。
 
-- 内容来源：`huangguoai.com`（黄果短剧网站），抓取规则移植自 [jinshengchan/huangguo-fongmi](https://github.com/jinshengchan/huangguo-fongmi) 站点脚本
+- 内容来源：`huangguoai.com`（黄果短剧网站），抓取规则移植自 [jinshengchan/huangguo-fongmi](https://github.com/jinshengchan/huangguo-fongmi) 站点脚本；播放地址解析同步自 [Yswag/xptv-extensions](https://github.com/Yswag/xptv-extensions) 的 `js/huangguo.js`（该仓库更新更活跃）：优先调 JSON 接口 `POST /api/videos/{id}/episodes/{ep}/playback` 取 `streams.main/hevc`，接口失效时走加密边缘通道（`/api/playback/request`，ECDH P-256 + HKDF-SHA256 + AES-256-GCM，协议 `dx150-edge-v1`），最后兜底旧版页面抓取
 - 纯 Kotlin + 原生 View（RecyclerView 焦点导航），无 Compose，低配电视盒子也能流畅跑
 - 播放：media3 ExoPlayer，直接播放网站下发的 HLS（.m3u8）地址，自动带 UA/Referer
 
@@ -15,7 +15,7 @@
    - 手机：文件管理器里直接点 APK 安装（首次需在系统里允许"安装未知来源应用"）
    - 电视/盒子：`adb install -t huangguoTV-v1.0.3.apk`，或拷到 U 盘用电视自带文件管理器安装
 3. 要求 Android 8.0+，横屏，电视（LEANBACK_LAUNCHER）和手机（LAUNCHER）双入口都有图标
-4. v1.0.2 起内置镜像直连（主站不通时自动发现并切换官方镜像），**无需 VPN** 直接用
+4. v1.0.2 起内置镜像直连（主站不通时自动发现并切换官方镜像），**无需 VPN** 直接用。2026-11 起主站 `huangguoai.com` DNS 被污染，官方主用域名变为 `huangguoai.io`（发布页 `huangguoai.ai`，旧发布页 `hgai5.com`），应用会把 `.io` 作为首个直连候选并从发布页自动发现最新域名，全部直连失败时回退系统代理访问主站
 5. APK 为个人密钥签名，不能覆盖安装其他签名的版本；升级请先卸载旧版（卸载会清收藏和续播记录）
 
 ### PC 版（Windows，浏览器界面）
@@ -48,7 +48,7 @@ npm start
 | 首页/分类 | 首页推荐 + AI成人短剧 / AI成人漫剧 / AI换脸 / AI魔改 / 排行榜，滚动自动翻页 |
 | 搜索 | `/search/video/{关键词}/` 分页搜索 |
 | 详情选集 | 解析详情页 `videoInitialData` 与选集网格，全部集数一键直达 |
-| HLS 播放 | `epPlaySrcs[集数]` → `videoSrc` → 页面 m3u8 兜底 |
+| HLS 播放 | JSON 接口 `streams.main/hevc` → 加密边缘通道 → `epPlaySrcs`/页面 m3u8 兜底 |
 | 封面解密 | 站点封面为 AES-CBC 加密 base64（key `f5d965df75336270` / iv `97b60394abc2fbe1`），本地解密显示 |
 | 自动连播 | 播完自动下一集 |
 | 断点续播 | 每部剧记住集数 + 进度，详情页显示"继续播放 第N集" |

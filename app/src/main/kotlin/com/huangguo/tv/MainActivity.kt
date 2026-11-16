@@ -1,6 +1,9 @@
 package com.huangguo.tv
 
 import android.app.Activity
+import android.app.UiModeManager
+import android.content.res.Configuration
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
@@ -23,6 +26,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 手机锁定竖屏；电视/盒子（LEANBACK）保持横屏，避免竖屏画面被裁切
+        val uiMode = (getSystemService(UI_MODE_SERVICE) as UiModeManager).currentModeType
+        requestedOrientation = if (uiMode == Configuration.UI_MODE_TYPE_TELEVISION)
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        else
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         root = FrameLayout(this)
         root.setBackgroundColor(Ui.BG)
         setContentView(root)
